@@ -18,105 +18,116 @@ okx = ccxt.okx({
     'secret': SECRET_KEY,
     'password': PASSPHRASE,
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}  # Mercado de Futuros Perpétuos
+    'options': {'defaultType': 'swap'}  # Contratos Futuros Perpétuos
 })
 
-# 🚨 TRAVA DE SEGURANÇA OBRIGATÓRIA: MODO DEMO / SIMULADO (PAPER TRADING)
+# 🚨 TRAVA DE SEGURANÇA: MODO DEMO / SIMULADO (PAPER TRADING)
 okx.set_sandbox_mode(True)
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({"status": "Servidor do Bot SMC Rodando em MODO DEMO!"}), 200
+    return jsonify({"status": "Servidor Bot SMC ativo em MODO DEMO!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
     if not data:
-        return jsonify({"status": "erro", "mensagem": "Sem dados"}), 400
+        return jsonify({"status": "erro", "mensagem": "Sem dados no Webhook"}), 400
 
     symbol = data.get('symbol', 'BTC/USDT:USDT')
-    direction = data.get('action')  # 'buy' ou 'sell'
+    direction = data.get('action', 'buy')  # 'buy' ou 'sell'
     
-    # Busca a cotação atual na OKX se o TradingView não enviar o preço fixo
+    # 1. Obter Cotação Atual do Ativo e Saldo da Conta Demo
     try:
-        price = float(data.get('price')) if data.get('price') else float(okx.fetch_ticker(symbol)['last'])
+        ticker = okx.fetch_ticker(symbol)
+        price = float(data.get('price')) if data.get('price') else float(ticker['last'])
+        
+        balance = okx.fetch_balance()
+        usdt_free = float(balance.get('USDT', {}).get('free', 1000.0))  # Saldo USDT disponível na Demo
     except Exception as e:
-        return jsonify({"status": "erro", "mensagem": f"Erro ao obter preco atual: {e}"}), 400
+        return jsonify({"status": "erro", "mensagem": f"Erro ao obter dados do mercado/banca: {e}"}), 400
 
-    print(f"\n🚨 SINAL RECEBIDO DO TRADINGVIEW: {direction} em {symbol} | Preço Atual: {price}")
+    print(f"\n🚨 SINAL DO TRADINGVIEW: {direction.upper()} em {symbol} | Preço Atual: {price} | Saldo Demo Livre: ${usdt_free:.2f}")
 
     if not CLAUDE_KEY:
-        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY ausente no Render"}), 500
+        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY ausente"}), 500
 
-    # ------------------------------------------------──
-    # O CLAUDE ANALISA O PREÇO E CALCULA O SL E TP
-    # ------------------------------------------------──
+    # 2. PROMPT DE GESTÃO DE RISCO E ESTRUTURA PARA O CLAUDE
     prompt = f"""
-    Você é um gestor de risco e trader especialista em Smart Money Concepts (SMC).
-    Um sinal de entrada foi gerado pelo indicador no TradingView:
+    Você é o Gerente Institucional de Risco e Gestão de Banca especialista em Smart Money Concepts (SMC).
+
+    DADOS DA OPORTUNIDADE:
     - Ativo: {symbol}
-    - Operação: {direction} (buy/sell)
-    - Preço de Entrada Atual: {price}
+    - Direção: {direction.upper()}
+    - Preço Atual de Entrada: {price}
+    - Saldo Livre na Conta (USDT): {usdt_free}
 
-    Sua tarefa de análise de risco SMC:
-    1. Calcule um Stop Loss (SL) técnico coerente para esta entrada e um Take Profit (TP).
-    2. A relação Risco x Retorno (R:R) DEVE ser de no mínimo 1:2.
-    3. Se a estrutura do preço for desfavorável, reprove a operação.
+    SUAS REGRAS OPERACIONAIS E TÉCNICAS:
+    1. Análise Estrutural: Calcule um Stop Loss (SL) técnico baseado na estrutura de mercado SMC (Order Blocks, FVG, Highs/Lows recentes) para o preço atual.
+    2. Relação Risco x Retorno (R:R): O Take Profit (TP) DEVE ser posicionado para oferecer uma relação R:R de no mínimo 1:2 (mínimo 2x a distância do SL).
+    3. Tamanho de Lote (Gestão de Banca): Defina a quantidade do lote/contratos ('amount') garantindo que, se o SL for atingido, o prejuízo Máximo seja de no máximo 1% do saldo disponível em USDT.
+    4. Veredito Final: Se a volatilidade estiver insana ou o risco desproporcional, REPROVE a operação.
 
-    Responda ESTRITAMENTE em formato JSON com o seguinte padrão:
+    Responda EXCLUSIVAMENTE em formato JSON com esta estrutura (sem formatação markdown adicional):
     {{
         "aprovado": true,
-        "sl": valor_do_stop_loss_numerico,
-        "tp": valor_do_take_profit_numerico,
-        "motivo": "Breve justificativa tecnica do calculo"
+        "sl": valor_do_stop_loss,
+        "tp": valor_do_take_profit,
+        "amount": quantidade_do_lote_em_contratos,
+        "risco_usd": valor_em_dolares_em_risco,
+        "rr_ratio": "1:2",
+        "motivo": "Explicação sucinta do veredito técnico"
     }}
-    (Se reprovar, defina "aprovado": false e coloque "sl": 0, "tp": 0).
+    (Se reprovar, coloque "aprovado": false, "sl": 0, "tp": 0, "amount": 0, "risco_usd": 0, "rr_ratio": "N/A", "motivo": "Justificativa da rejeição").
     """
 
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
         resposta = client.messages.create(
             model="claude-3-5-sonnet-20241022",
-            max_tokens=200,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}]
         )
         
         texto_resposta = resposta.content[0].text.strip()
-        print(f"🤖 RESPOSTA DO CLAUDE:\n{texto_resposta}")
+        print(f"\n🤖 VEREDITO E CÁLCULO DO CLAUDE:\n{texto_resposta}\n")
+
+        # Limpeza para garantir parsing JSON perfeito
+        if texto_resposta.startswith("```json"):
+            texto_resposta = texto_resposta.replace("```json", "").replace("```", "").strip()
 
         dados_claude = json.loads(texto_resposta)
 
         if dados_claude.get("aprovado") == True:
             sl_calculado = float(dados_claude.get("sl"))
             tp_calculado = float(dados_claude.get("tp"))
+            amount_calculado = float(dados_claude.get("amount", 0.001))
             side = 'buy' if str(direction).lower() in ['buy', 'buy_signal', 'long'] else 'sell'
-            amount = 0.001  # Tamanho do lote simulado para o teste
 
-            # Executa a ordem na OKX DEMO
+            # 3. Execução da Ordem na OKX DEMO
             order = okx.create_order(
                 symbol=symbol,
                 type='market',
                 side=side,
-                amount=amount,
+                amount=amount_calculado,
                 params={
                     'stopLoss': {'triggerPrice': sl_calculado, 'type': 'market'},
                     'takeProfit': {'triggerPrice': tp_calculado, 'type': 'market'}
                 }
             )
-            print(f"✅ ORDEM EXECUTADA NA DEMO! ID: {order.get('id')} | SL: {sl_calculado} | TP: {tp_calculado}")
+
+            print(f"✅ ORDEM EXECUTADA NA DEMO! ID: {order.get('id')} | Lote: {amount_calculado} | SL: {sl_calculado} | TP: {tp_calculado}")
             return jsonify({
-                "status": "sucesso_demo", 
-                "ordem_id": order.get('id'), 
-                "sl_calculado": sl_calculado,
-                "tp_calculado": tp_calculado,
-                "motivo": dados_claude.get("motivo")
+                "status": "sucesso_demo",
+                "ordem_id": order.get('id'),
+                "detalhes": dados_claude
             }), 200
         else:
-            print("🛑 TRADE REPROVADO PELO CLAUDE.")
-            return jsonify({"status": "rejeitado_pelo_claude", "motivo": dados_claude.get("motivo")}), 200
+            print(f"🛑 TRADE REPROVADO PELO CLAUDE. Motivo: {dados_claude.get('motivo')}")
+            return jsonify({"status": "rejeitado_pelo_claude", "detalhes": dados_claude}), 200
 
     except Exception as e:
-        print(f"❌ ERRO NA EXECUÇÃO: {e}")
+        print(f"❌ ERRO NO PROCESSAMENTO / EXECUÇÃO: {e}")
         return jsonify({"status": "erro", "detalhes": str(e)}), 500
 
 if __name__ == '__main__':
