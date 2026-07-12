@@ -18,10 +18,10 @@ okx = ccxt.okx({
     'secret': SECRET_KEY,
     'password': PASSPHRASE,
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}
+    'options': {'defaultType': 'swap'}  # Mercado de Futuros Perpétuos
 })
 
-# 🚨 TRAVA DE SEGURANÇA: MODO DEMO / SIMULADO (PAPER TRADING)
+# 🚨 TRAVA DE SEGURANÇA OBRIGATÓRIA: MODO DEMO / SIMULADO (PAPER TRADING)
 okx.set_sandbox_mode(True)
 
 @app.route('/', methods=['GET'])
@@ -35,40 +35,40 @@ def webhook():
         return jsonify({"status": "erro", "mensagem": "Sem dados"}), 400
 
     symbol = data.get('symbol', 'BTC/USDT:USDT')
-    direction = data.get('action') # 'buy' ou 'sell'
+    direction = data.get('action')  # 'buy' ou 'sell'
     
-    # Se o TradingView enviar o preço, usa ele; se não, pega o preço atual da OKX
+    # Busca a cotação atual na OKX se o TradingView não enviar o preço fixo
     try:
         price = float(data.get('price')) if data.get('price') else float(okx.fetch_ticker(symbol)['last'])
     except Exception as e:
-        return jsonify({"status": "erro", "mensagem": f"Erro ao obter preco: {e}"}), 400
+        return jsonify({"status": "erro", "mensagem": f"Erro ao obter preco atual: {e}"}), 400
 
     print(f"\n🚨 SINAL RECEBIDO DO TRADINGVIEW: {direction} em {symbol} | Preço Atual: {price}")
 
     if not CLAUDE_KEY:
-        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY ausente"}), 500
+        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY ausente no Render"}), 500
 
     # ------------------------------------------------──
-    # O CLAUDE ANALISA O PREÇO E CALCULA SL E TP
+    # O CLAUDE ANALISA O PREÇO E CALCULA O SL E TP
     # ------------------------------------------------──
     prompt = f"""
-    Você é um trader institucional e especialista em Smart Money Concepts (SMC).
-    Um sinal de entrada acabou de ser gerado no TradingView:
+    Você é um gestor de risco e trader especialista em Smart Money Concepts (SMC).
+    Um sinal de entrada foi gerado pelo indicador no TradingView:
     - Ativo: {symbol}
     - Operação: {direction} (buy/sell)
     - Preço de Entrada Atual: {price}
 
-    Sua tarefa:
-    1. Com base na estrutura SMC para este preço de entrada, calcule um Stop Loss (SL) técnico e um Take Profit (TP).
+    Sua tarefa de análise de risco SMC:
+    1. Calcule um Stop Loss (SL) técnico coerente para esta entrada e um Take Profit (TP).
     2. A relação Risco x Retorno (R:R) DEVE ser de no mínimo 1:2.
-    3. Se o sinal for inviável ou o risco estiver desproporcional, reprove a operação.
+    3. Se a estrutura do preço for desfavorável, reprove a operação.
 
     Responda ESTRITAMENTE em formato JSON com o seguinte padrão:
     {{
         "aprovado": true,
         "sl": valor_do_stop_loss_numerico,
         "tp": valor_do_take_profit_numerico,
-        "motivo": "Breve justificativa do cálculo do SL e TP"
+        "motivo": "Breve justificativa tecnica do calculo"
     }}
     (Se reprovar, defina "aprovado": false e coloque "sl": 0, "tp": 0).
     """
@@ -82,7 +82,7 @@ def webhook():
         )
         
         texto_resposta = resposta.content[0].text.strip()
-        print(f"🤖 DECISÃO E CÁLCULO DO CLAUDE:\n{texto_resposta}")
+        print(f"🤖 RESPOSTA DO CLAUDE:\n{texto_resposta}")
 
         dados_claude = json.loads(texto_resposta)
 
@@ -90,9 +90,9 @@ def webhook():
             sl_calculado = float(dados_claude.get("sl"))
             tp_calculado = float(dados_claude.get("tp"))
             side = 'buy' if str(direction).lower() in ['buy', 'buy_signal', 'long'] else 'sell'
-            amount = 0.001  # Tamanho do lote de teste na Demo
+            amount = 0.001  # Tamanho do lote simulado para o teste
 
-            # Executa a Ordem na OKX DEMO com os Stops calculados pelo Claude
+            # Executa a ordem na OKX DEMO
             order = okx.create_order(
                 symbol=symbol,
                 type='market',
@@ -116,7 +116,7 @@ def webhook():
             return jsonify({"status": "rejeitado_pelo_claude", "motivo": dados_claude.get("motivo")}), 200
 
     except Exception as e:
-        print(f"❌ ERRO NO PROCESSAMENTO DO CLAUDE / EXECUÇÃO: {e}")
+        print(f"❌ ERRO NA EXECUÇÃO: {e}")
         return jsonify({"status": "erro", "detalhes": str(e)}), 500
 
 if __name__ == '__main__':
