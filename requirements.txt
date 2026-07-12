@@ -1,0 +1,4 @@
+flask
+ccxt
+anthropic
+gunicorn
