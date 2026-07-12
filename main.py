@@ -5,33 +5,37 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Leitura e verificação das variáveis de ambiente
+# Leitura e verificação das variáveis
 API_KEY = os.getenv('OKX_API_KEY', '')
 SECRET_KEY = os.getenv('OKX_SECRET_KEY', '')
 PASSPHRASE = os.getenv('OKX_PASSPHRASE', '')
 CLAUDE_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 
-# Conexão OKX
-okx = ccxt.okx({
-    'apiKey': API_KEY,
-    'secret': SECRET_KEY,
-    'password': PASSPHRASE,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}
-})
+# Teste de inicialização das APIs
+print("--- INICIANDO SERVIDOR BOT SMC ---")
+print(f"OKX API Key configurada: {'SIM' if API_KEY else 'NAO'}")
+print(f"Claude API Key configurada: {'SIM' if CLAUDE_KEY else 'NAO'}")
 
-# Conexão Claude
-anthropic_client = anthropic.Anthropic(api_key=CLAUDE_KEY) if CLAUDE_KEY else None
+try:
+    okx = ccxt.okx({
+        'apiKey': API_KEY,
+        'secret': SECRET_KEY,
+        'password': PASSPHRASE,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'swap'}
+    })
+except Exception as e:
+    print(f"Erro ao inicializar OKX CCXT: {e}")
 
 @app.route('/', methods=['GET'])
-def home():
-    return jsonify({"status": "Servidor rodando com sucesso!"}), 200
+def health_check():
+    return jsonify({"status": "Servidor do Bot no Ar!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
     if not data:
-        return jsonify({"status": "erro", "mensagem": "Sem dados recebidos"}), 400
+        return jsonify({"status": "erro", "mensagem": "Sem dados"}), 400
 
     symbol = data.get('symbol')
     direction = data.get('action')
@@ -40,33 +44,23 @@ def webhook():
         price = float(data.get('price', 0))
         sl = float(data.get('sl', 0))
         tp = float(data.get('tp', 0))
-    except (ValueError, TypeError):
-        return jsonify({"status": "erro", "mensagem": "Dados numericos invalidos"}), 400
+    except Exception:
+        return jsonify({"status": "erro", "mensagem": "Valores incorretos"}), 400
 
-    print(f"🚨 Webhook Recebido: {symbol} - {direction} | Preço: {price} | SL: {sl} | TP: {tp}")
+    print(f"🚨 Webhook Recebido: {symbol} | {direction} | Preço: {price}")
 
-    if not anthropic_client:
-        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY nao configurada"}), 500
-
-    # Chamada de validação ao Claude
-    prompt = f"""
-    Voce e um gerenciador de risco SMC.
-    Analise a oportunidade:
-    - Ativo: {symbol}
-    - Operacao: {direction}
-    - Entrada: {price}
-    - Stop Loss: {sl}
-    - Take Profit: {tp}
-
-    Responda ESTRITAMENTE em formato JSON:
-    {{
-        "aprovado": true,
-        "motivo": "sua justificativa"
-    }}
-    """
+    if not CLAUDE_KEY:
+        return jsonify({"status": "erro", "mensagem": "ANTHROPIC_API_KEY ausente"}), 500
 
     try:
-        resposta = anthropic_client.messages.create(
+        client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+        prompt = f"""
+        Analise esta entrada SMC:
+        Ativo: {symbol}, Operacao: {direction}, Entrada: {price}, SL: {sl}, TP: {tp}
+        Responda em JSON: {{"aprovado": true, "motivo": "explicacao"}}
+        """
+        
+        resposta = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}]
@@ -77,8 +71,6 @@ def webhook():
 
         if '"aprovado": true' in analise.lower():
             side = 'buy' if str(direction).lower() == 'buy' else 'sell'
-            
-            # Executa na OKX
             order = okx.create_order(
                 symbol=symbol,
                 type='market',
@@ -91,12 +83,12 @@ def webhook():
             )
             return jsonify({"status": "sucesso", "ordem_id": order.get('id')}), 200
         else:
-            return jsonify({"status": "rejeitado_pelo_claude", "detalhes": analise}), 200
+            return jsonify({"status": "rejeitado", "detalhes": analise}), 200
 
     except Exception as e:
-        print(f"❌ Erro no processamento: {str(e)}")
+        print(f"Erro na execucao: {e}")
         return jsonify({"status": "erro", "detalhes": str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
