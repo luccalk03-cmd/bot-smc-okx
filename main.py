@@ -1,35 +1,32 @@
 import os
 import ccxt
+import json
 import anthropic
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Leitura e verificação das variáveis
+# Configurações de Ambiente
 API_KEY = os.getenv('OKX_API_KEY', '')
 SECRET_KEY = os.getenv('OKX_SECRET_KEY', '')
 PASSPHRASE = os.getenv('OKX_PASSPHRASE', '')
 CLAUDE_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 
-# Teste de inicialização das APIs
-print("--- INICIANDO SERVIDOR BOT SMC ---")
-print(f"OKX API Key configurada: {'SIM' if API_KEY else 'NAO'}")
-print(f"Claude API Key configurada: {'SIM' if CLAUDE_KEY else 'NAO'}")
+# Conexão OKX
+okx = ccxt.okx({
+    'apiKey': API_KEY,
+    'secret': SECRET_KEY,
+    'password': PASSPHRASE,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'swap'}
+})
 
-try:
-    okx = ccxt.okx({
-        'apiKey': API_KEY,
-        'secret': SECRET_KEY,
-        'password': PASSPHRASE,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'swap'}
-    })
-except Exception as e:
-    print(f"Erro ao inicializar OKX CCXT: {e}")
+# 🚨 TRAVA DE SEGURANÇA: MODO DEMO / SIMULADO (PAPER TRADING)
+okx.set_sandbox_mode(True)
 
 @app.route('/', methods=['GET'])
-def health_check():
-    return jsonify({"status": "Servidor do Bot no Ar!"}), 200
+def health():
+    return jsonify({"status": "Servidor do Bot SMC Rodando em MODO DEMO!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -37,56 +34,89 @@ def webhook():
     if not data:
         return jsonify({"status": "erro", "mensagem": "Sem dados"}), 400
 
-    symbol = data.get('symbol')
-    direction = data.get('action')
+    symbol = data.get('symbol', 'BTC/USDT:USDT')
+    direction = data.get('action') # 'buy' ou 'sell'
     
+    # Se o TradingView enviar o preço, usa ele; se não, pega o preço atual da OKX
     try:
-        price = float(data.get('price', 0))
-        sl = float(data.get('sl', 0))
-        tp = float(data.get('tp', 0))
-    except Exception:
-        return jsonify({"status": "erro", "mensagem": "Valores incorretos"}), 400
+        price = float(data.get('price')) if data.get('price') else float(okx.fetch_ticker(symbol)['last'])
+    except Exception as e:
+        return jsonify({"status": "erro", "mensagem": f"Erro ao obter preco: {e}"}), 400
 
-    print(f"🚨 Webhook Recebido: {symbol} | {direction} | Preço: {price}")
+    print(f"\n🚨 SINAL RECEBIDO DO TRADINGVIEW: {direction} em {symbol} | Preço Atual: {price}")
 
     if not CLAUDE_KEY:
-        return jsonify({"status": "erro", "mensagem": "ANTHROPIC_API_KEY ausente"}), 500
+        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY ausente"}), 500
+
+    # ------------------------------------------------──
+    # O CLAUDE ANALISA O PREÇO E CALCULA SL E TP
+    # ------------------------------------------------──
+    prompt = f"""
+    Você é um trader institucional e especialista em Smart Money Concepts (SMC).
+    Um sinal de entrada acabou de ser gerado no TradingView:
+    - Ativo: {symbol}
+    - Operação: {direction} (buy/sell)
+    - Preço de Entrada Atual: {price}
+
+    Sua tarefa:
+    1. Com base na estrutura SMC para este preço de entrada, calcule um Stop Loss (SL) técnico e um Take Profit (TP).
+    2. A relação Risco x Retorno (R:R) DEVE ser de no mínimo 1:2.
+    3. Se o sinal for inviável ou o risco estiver desproporcional, reprove a operação.
+
+    Responda ESTRITAMENTE em formato JSON com o seguinte padrão:
+    {{
+        "aprovado": true,
+        "sl": valor_do_stop_loss_numerico,
+        "tp": valor_do_take_profit_numerico,
+        "motivo": "Breve justificativa do cálculo do SL e TP"
+    }}
+    (Se reprovar, defina "aprovado": false e coloque "sl": 0, "tp": 0).
+    """
 
     try:
         client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-        prompt = f"""
-        Analise esta entrada SMC:
-        Ativo: {symbol}, Operacao: {direction}, Entrada: {price}, SL: {sl}, TP: {tp}
-        Responda em JSON: {{"aprovado": true, "motivo": "explicacao"}}
-        """
-        
         resposta = client.messages.create(
             model="claude-3-5-sonnet-20241022",
-            max_tokens=150,
+            max_tokens=200,
             messages=[{"role": "user", "content": prompt}]
         )
         
-        analise = resposta.content[0].text.strip()
-        print(f"🤖 Claude: {analise}")
+        texto_resposta = resposta.content[0].text.strip()
+        print(f"🤖 DECISÃO E CÁLCULO DO CLAUDE:\n{texto_resposta}")
 
-        if '"aprovado": true' in analise.lower():
-            side = 'buy' if str(direction).lower() == 'buy' else 'sell'
+        dados_claude = json.loads(texto_resposta)
+
+        if dados_claude.get("aprovado") == True:
+            sl_calculado = float(dados_claude.get("sl"))
+            tp_calculado = float(dados_claude.get("tp"))
+            side = 'buy' if str(direction).lower() in ['buy', 'buy_signal', 'long'] else 'sell'
+            amount = 0.001  # Tamanho do lote de teste na Demo
+
+            # Executa a Ordem na OKX DEMO com os Stops calculados pelo Claude
             order = okx.create_order(
                 symbol=symbol,
                 type='market',
                 side=side,
-                amount=0.001,
+                amount=amount,
                 params={
-                    'stopLoss': {'triggerPrice': sl, 'type': 'market'},
-                    'takeProfit': {'triggerPrice': tp, 'type': 'market'}
+                    'stopLoss': {'triggerPrice': sl_calculado, 'type': 'market'},
+                    'takeProfit': {'triggerPrice': tp_calculado, 'type': 'market'}
                 }
             )
-            return jsonify({"status": "sucesso", "ordem_id": order.get('id')}), 200
+            print(f"✅ ORDEM EXECUTADA NA DEMO! ID: {order.get('id')} | SL: {sl_calculado} | TP: {tp_calculado}")
+            return jsonify({
+                "status": "sucesso_demo", 
+                "ordem_id": order.get('id'), 
+                "sl_calculado": sl_calculado,
+                "tp_calculado": tp_calculado,
+                "motivo": dados_claude.get("motivo")
+            }), 200
         else:
-            return jsonify({"status": "rejeitado", "detalhes": analise}), 200
+            print("🛑 TRADE REPROVADO PELO CLAUDE.")
+            return jsonify({"status": "rejeitado_pelo_claude", "motivo": dados_claude.get("motivo")}), 200
 
     except Exception as e:
-        print(f"Erro na execucao: {e}")
+        print(f"❌ ERRO NO PROCESSAMENTO DO CLAUDE / EXECUÇÃO: {e}")
         return jsonify({"status": "erro", "detalhes": str(e)}), 500
 
 if __name__ == '__main__':
