@@ -5,49 +5,63 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Conexão com a OKX via CCXT
+# Leitura e verificação das variáveis de ambiente
+API_KEY = os.getenv('OKX_API_KEY', '')
+SECRET_KEY = os.getenv('OKX_SECRET_KEY', '')
+PASSPHRASE = os.getenv('OKX_PASSPHRASE', '')
+CLAUDE_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+
+# Conexão OKX
 okx = ccxt.okx({
-    'apiKey': os.getenv('OKX_API_KEY'),
-    'secret': os.getenv('OKX_SECRET_KEY'),
-    'password': os.getenv('OKX_PASSPHRASE'),
+    'apiKey': API_KEY,
+    'secret': SECRET_KEY,
+    'password': PASSPHRASE,
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}  # Para Mercado Futuro / Perpétuos
+    'options': {'defaultType': 'swap'}
 })
 
-# Conexão com o Claude
-anthropic_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+# Conexão Claude
+anthropic_client = anthropic.Anthropic(api_key=CLAUDE_KEY) if CLAUDE_KEY else None
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"status": "Servidor rodando com sucesso!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
     if not data:
-        return jsonify({"status": "erro", "mensagem": "Sem dados"}), 400
+        return jsonify({"status": "erro", "mensagem": "Sem dados recebidos"}), 400
 
     symbol = data.get('symbol')
     direction = data.get('action')
-    price = float(data.get('price'))
-    sl = float(data.get('sl'))
-    tp = float(data.get('tp'))
+    
+    try:
+        price = float(data.get('price', 0))
+        sl = float(data.get('sl', 0))
+        tp = float(data.get('tp', 0))
+    except (ValueError, TypeError):
+        return jsonify({"status": "erro", "mensagem": "Dados numericos invalidos"}), 400
 
-    # 1. Pergunta ao Claude se o Trade é seguro
+    print(f"🚨 Webhook Recebido: {symbol} - {direction} | Preço: {price} | SL: {sl} | TP: {tp}")
+
+    if not anthropic_client:
+        return jsonify({"status": "erro", "mensagem": "Chave ANTHROPIC_API_KEY nao configurada"}), 500
+
+    # Chamada de validação ao Claude
     prompt = f"""
-    Você é um gerenciador de risco e analista técnico especialista em Smart Money Concepts (SMC).
-    
-    Analise a seguinte oportunidade enviada pelo indicador:
+    Voce e um gerenciador de risco SMC.
+    Analise a oportunidade:
     - Ativo: {symbol}
-    - Operação: {direction} (buy/sell)
-    - Preço de Entrada: {price}
-    - Stop Loss (SL): {sl}
-    - Take Profit (TP): {tp}
-    
-    Regras de Validação:
-    1. A relação Risco x Retorno (R:R) deve ser de no mínimo 1:1.5.
-    2. O Stop Loss deve ser anatomicamente coerente.
+    - Operacao: {direction}
+    - Entrada: {price}
+    - Stop Loss: {sl}
+    - Take Profit: {tp}
 
-    Responda EXATAMENTE no formato JSON com duas chaves:
+    Responda ESTRITAMENTE em formato JSON:
     {{
         "aprovado": true,
-        "motivo": "Sua justificativa aqui"
+        "motivo": "sua justificativa"
     }}
     """
 
@@ -58,30 +72,31 @@ def webhook():
             messages=[{"role": "user", "content": prompt}]
         )
         
-        analise_texto = resposta.content[0].text.strip()
+        analise = resposta.content[0].text.strip()
+        print(f"🤖 Claude: {analise}")
 
-        # Check se o Claude Aprovou
-        if '"aprovado": true' in analise_texto.lower():
-            side = 'buy' if direction.lower() == 'buy' else 'sell'
-            amount = 0.001  # Tamanho da ordem/contratos
-
-            # 2. Executa a ordem na OKX com SL e TP
+        if '"aprovado": true' in analise.lower():
+            side = 'buy' if str(direction).lower() == 'buy' else 'sell'
+            
+            # Executa na OKX
             order = okx.create_order(
                 symbol=symbol,
                 type='market',
                 side=side,
-                amount=amount,
+                amount=0.001,
                 params={
                     'stopLoss': {'triggerPrice': sl, 'type': 'market'},
                     'takeProfit': {'triggerPrice': tp, 'type': 'market'}
                 }
             )
-            return jsonify({"status": "sucesso", "ordem_id": order['id']}), 200
+            return jsonify({"status": "sucesso", "ordem_id": order.get('id')}), 200
         else:
-            return jsonify({"status": "rejeitado_pelo_claude", "motivo": analise_texto}), 200
+            return jsonify({"status": "rejeitado_pelo_claude", "detalhes": analise}), 200
 
     except Exception as e:
+        print(f"❌ Erro no processamento: {str(e)}")
         return jsonify({"status": "erro", "detalhes": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
